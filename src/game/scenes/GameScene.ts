@@ -3,6 +3,7 @@ import { useGameStore } from '../../store/gameStore';
 import { GridManager } from '../GridManager';
 import { js as EasyStar } from 'easystarjs';
 import { Customer } from '../objects/Customer';
+import { Staff } from '../objects/Staff';
 
 export const TILE_SIZE = 32;
 
@@ -16,6 +17,7 @@ export class GameScene extends Phaser.Scene {
 
   private easyStar!: EasyStar;
   private customersGroup!: Phaser.GameObjects.Group;
+  private staffGroup!: Phaser.GameObjects.Group;
   private pathfindingGrid!: number[][];
   private gridOffset = 50; // To handle negative coordinates, we shift by 50 tiles
 
@@ -32,8 +34,35 @@ export class GameScene extends Phaser.Scene {
     this.gridManager = new GridManager();
     this.spritesGroup = this.add.group();
     this.customersGroup = this.add.group();
+    this.staffGroup = this.add.group();
 
     this.setupPathfinding();
+
+    window.addEventListener('hire-staff', (e: any) => {
+      this.spawnStaff(e.detail.type);
+    });
+
+    window.addEventListener('save-grid', () => {
+       const data = this.gridManager.serialize();
+       localStorage.setItem('arcade_grid_data', data);
+    });
+
+    window.addEventListener('load-grid', () => {
+       const data = localStorage.getItem('arcade_grid_data');
+       if (data) {
+          this.gridManager.deserialize(data);
+          this.refreshSprites();
+          this.updatePathfindingGrid();
+       }
+    });
+
+    // Game Clock
+    this.time.addEvent({
+      delay: 1000, // Every real second is some game time
+      callback: this.advanceClock,
+      callbackScope: this,
+      loop: true
+    });
 
     // Spawn a customer every few seconds
     this.time.addEvent({
@@ -41,6 +70,11 @@ export class GameScene extends Phaser.Scene {
       callback: this.spawnCustomer,
       callbackScope: this,
       loop: true
+    });
+
+    // Handle external sprite refreshes
+    window.addEventListener('refresh-sprites', () => {
+       this.refreshSprites();
     });
 
     // Grid graphics
@@ -143,6 +177,18 @@ export class GameScene extends Phaser.Scene {
         cost = 500;
         if (store.money >= cost) placed = this.gridManager.addObject(snappedX, snappedY, 'arcade_crane');
         break;
+      case 'vending':
+        cost = 300;
+        if (store.money >= cost) placed = this.gridManager.addObject(snappedX, snappedY, 'vending');
+        break;
+      case 'toilet':
+        cost = 400;
+        if (store.money >= cost) placed = this.gridManager.addObject(snappedX, snappedY, 'toilet');
+        break;
+      case 'trashcan':
+        cost = 50;
+        if (store.money >= cost) placed = this.gridManager.addObject(snappedX, snappedY, 'trashcan');
+        break;
     }
 
     if (placed) {
@@ -176,8 +222,8 @@ export class GameScene extends Phaser.Scene {
     }
 
     for (const o of objects) {
-      // Machines block pathing. Doors do not.
-      if (o.type.startsWith('arcade_')) {
+      // Machines, vending, and toilets block pathing. Doors and trashcans do not block completely.
+      if (o.type.startsWith('arcade_') || o.type === 'vending' || o.type === 'toilet') {
         const gX = Math.floor(o.x / TILE_SIZE) + this.gridOffset;
         const gY = Math.floor(o.y / TILE_SIZE) + this.gridOffset;
         if (gX >= 0 && gX < gridSize && gY >= 0 && gY < gridSize) {
@@ -204,7 +250,49 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  advanceClock() {
+    const store = useGameStore.getState();
+    const wasOpen = store.isOpen;
+
+    // Advance 5 in-game minutes every real second
+    store.advanceTime(5);
+
+    // Check if we just closed
+    const isOpen = useGameStore.getState().isOpen;
+    if (wasOpen && !isOpen) {
+       this.generateDailyReport();
+    }
+  }
+
+  generateDailyReport() {
+    const store = useGameStore.getState();
+
+    // Calculate expenses
+    const objects = this.gridManager.getAllObjects().objects;
+    let machines = 0;
+    for (const obj of objects) {
+      if (obj.type.startsWith('arcade_') || obj.type === 'vending') machines++;
+    }
+
+    // Simple economy calculation for expenses (e.g. $10 electricity per machine)
+    const machineExpenses = machines * 10;
+
+    // $100 per staff member
+    const staffExpenses = this.staffGroup.getChildren().length * 100;
+
+    const totalExpenses = machineExpenses + staffExpenses;
+    store.deductMoney(totalExpenses);
+
+    store.setDailyReport({
+       income: 0, // This would require complex tracking, simplified for now
+       expenses: totalExpenses
+    });
+  }
+
   spawnCustomer() {
+    const store = useGameStore.getState();
+    if (!store.isOpen) return;
+
     // Check if we have a door, else don't spawn
     const hasDoor = this.gridManager.getAllObjects().objects.some(o => o.type === 'door');
     if (!hasDoor) return;
@@ -213,6 +301,15 @@ export class GameScene extends Phaser.Scene {
     const startY = -200; // Spawn slightly off top
     const customer = new Customer(this, startX, startY, this.easyStar, this.gridManager, this.gridOffset);
     this.customersGroup.add(customer);
+  }
+
+  spawnStaff(type: 'janitor' | 'mechanic') {
+    const hasDoor = this.gridManager.getAllObjects().objects.some(o => o.type === 'door');
+    const startX = hasDoor ? 0 : 0;
+    const startY = hasDoor ? 0 : 0;
+
+    const staff = new Staff(this, startX, startY, type, this.easyStar, this.gridManager, this.gridOffset);
+    this.staffGroup.add(staff);
   }
 
   refreshSprites() {
@@ -233,6 +330,12 @@ export class GameScene extends Phaser.Scene {
     for (const o of objects) {
       const sprite = this.add.sprite(o.x, o.y, o.type).setOrigin(0, 0);
       this.spritesGroup.add(sprite);
+
+      // Draw broken indicator if needed
+      if (o.condition !== undefined && o.condition <= 0) {
+        const indicator = this.add.sprite(o.x + TILE_SIZE/2, o.y, 'broken_indicator');
+        this.spritesGroup.add(indicator);
+      }
     }
   }
 

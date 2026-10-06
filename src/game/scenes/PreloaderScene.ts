@@ -18,6 +18,19 @@ export class PreloaderScene extends Phaser.Scene {
 
     // Character
     this.createCircleTexture('customer', 16, 0x00ff00, 0x005500); // Green circle
+
+    // New Objects
+    this.createTexture('vending', 32, 32, 0xffa500, 0xcc8400); // Orange
+    this.createTexture('toilet', 32, 32, 0xdddddd, 0xaaaaaa); // White/Gray
+    this.createTexture('trashcan', 32, 32, 0x333333, 0x111111); // Dark Gray
+
+    // Dirt/Trash
+    this.createCircleTexture('trash', 4, 0x8b4513); // Small brown circle
+    this.createCircleTexture('broken_indicator', 8, 0xff0000, 0x000000); // Red alert dot
+
+    // Staff
+    this.createCircleTexture('janitor', 16, 0x00ffff, 0x008888); // Cyan circle
+    this.createCircleTexture('mechanic', 16, 0xffff00, 0x888800); // Yellow circle
   }
 
   createTexture(key: string, width: number, height: number, color: number, outlineColor?: number) {

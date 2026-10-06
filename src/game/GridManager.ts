@@ -3,6 +3,7 @@ export interface GridObject {
   x: number;
   y: number;
   type: string;
+  condition?: number; // 0 to 100 for machines
 }
 
 export class GridManager {
@@ -44,7 +45,11 @@ export class GridManager {
       }
     } else {
       if (this.floors.has(key) && !this.objects.has(key) && !this.walls.has(key)) {
-        this.objects.set(key, { id: key, x, y, type });
+        let condition = undefined;
+        if (type.startsWith('arcade_') || type === 'vending' || type === 'toilet') {
+          condition = 100;
+        }
+        this.objects.set(key, { id: key, x, y, type, condition });
         return true;
       }
     }
@@ -65,6 +70,36 @@ export class GridManager {
     return true; // Outside grass is walkable, floors are walkable, doors are walkable
   }
 
+  removeObject(x: number, y: number) {
+    const key = this.getKey(x, y);
+    if (this.objects.has(key)) {
+       this.objects.delete(key);
+       return true;
+    }
+    return false;
+  }
+
+  damageObject(id: string, amount: number) {
+    // Find object by id since x/y might be harder to get from the customer
+    for (const obj of this.objects.values()) {
+      if (obj.id === id && obj.condition !== undefined) {
+        obj.condition = Math.max(0, obj.condition - amount);
+        return obj.condition;
+      }
+    }
+    return -1;
+  }
+
+  repairObject(id: string) {
+    for (const obj of this.objects.values()) {
+      if (obj.id === id && obj.condition !== undefined) {
+        obj.condition = 100;
+        return true;
+      }
+    }
+    return false;
+  }
+
   getAllObjects() {
     return {
       floors: Array.from(this.floors.values()),
@@ -75,6 +110,29 @@ export class GridManager {
 
   getObjectAt(x: number, y: number) {
      return this.objects.get(this.getKey(x, y));
+  }
+
+  // Serialization for save/load
+  serialize(): string {
+    return JSON.stringify(this.getAllObjects());
+  }
+
+  deserialize(data: string) {
+    try {
+      const parsed = JSON.parse(data);
+      this.floors.clear();
+      this.walls.clear();
+      this.objects.clear();
+
+      for (const f of parsed.floors || []) this.floors.set(f.id, f);
+      for (const w of parsed.walls || []) this.walls.set(w.id, w);
+      for (const o of parsed.objects || []) this.objects.set(o.id, o);
+
+      return true;
+    } catch (e) {
+      console.error("Failed to deserialize grid data", e);
+      return false;
+    }
   }
 }
 

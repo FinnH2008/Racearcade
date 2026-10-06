@@ -4,12 +4,13 @@ import { GridManager } from '../GridManager';
 import { TILE_SIZE } from '../scenes/GameScene';
 import { useGameStore } from '../../store/gameStore';
 
-export type CustomerState = 'SPAWNED' | 'WALKING_TO_DOOR' | 'EVALUATING' | 'WALKING_TO_MACHINE' | 'PLAYING' | 'LEAVING';
+export type CustomerState = 'SPAWNED' | 'WALKING_TO_DOOR' | 'EVALUATING' | 'WALKING_TO_MACHINE' | 'PLAYING' | 'LEAVING' | 'WALKING_TO_NEED' | 'FULFILLING_NEED';
 
 export class Customer extends Phaser.GameObjects.Container {
   public currentState: CustomerState = 'SPAWNED';
   private sprite: Phaser.GameObjects.Sprite;
   public targetMachine: string | null = null;
+  public targetNeedObj: { x: number, y: number, type: string } | null = null;
   private easyStar: EasyStar;
   private gridManager: GridManager;
   private currentPath: { x: number, y: number }[] = [];
@@ -18,6 +19,12 @@ export class Customer extends Phaser.GameObjects.Container {
   public patience: number;
   private thoughtBubble: Phaser.GameObjects.Text;
   private gridOffset: number;
+
+  // Needs (0 to 100, 100 is fully satisfied, drops over time)
+  public thirst: number = 100;
+  public bladder: number = 100;
+
+  private needsTimer: Phaser.Time.TimerEvent;
 
   constructor(scene: Phaser.Scene, x: number, y: number, easyStar: EasyStar, gridManager: GridManager, gridOffset: number) {
     super(scene, x, y);
@@ -37,7 +44,58 @@ export class Customer extends Phaser.GameObjects.Container {
 
     scene.add.existing(this);
 
+    this.needsTimer = scene.time.addEvent({
+      delay: 5000,
+      callback: this.decreaseNeeds,
+      callbackScope: this,
+      loop: true
+    });
+
     this.think();
+  }
+
+  decreaseNeeds() {
+    if (this.currentState === 'LEAVING') return;
+
+    // Needs decrease faster if playing, slower if wandering
+    this.thirst -= Phaser.Math.Between(2, 5);
+    this.bladder -= Phaser.Math.Between(2, 5);
+
+    if ((this.thirst < 30 || this.bladder < 30) && this.currentState === 'EVALUATING') {
+        this.think(); // Force re-evaluation to prioritize needs
+    }
+
+    if (this.thirst <= 0 || this.bladder <= 0) {
+        this.setThought("I can't take this!");
+        const store = useGameStore.getState();
+        store.addReputation(-3);
+
+        // Maybe drop trash because they are angry
+        if (Math.random() > 0.5) {
+           this.dropTrash();
+        }
+
+        this.currentState = 'LEAVING';
+        this.think();
+    }
+  }
+
+  dropTrash() {
+      const snappedX = Math.floor(this.x / TILE_SIZE) * TILE_SIZE;
+      const snappedY = Math.floor(this.y / TILE_SIZE) * TILE_SIZE;
+
+      const objects = this.gridManager.getAllObjects().objects;
+      const nearbyTrashcan = objects.find(o =>
+          o.type === 'trashcan' &&
+          Phaser.Math.Distance.Between(snappedX, snappedY, o.x, o.y) <= TILE_SIZE * 1.5
+      );
+
+      if (!nearbyTrashcan) {
+          if (this.gridManager.isWalkable(snappedX, snappedY)) {
+             this.gridManager.addObject(snappedX, snappedY, 'trash');
+             window.dispatchEvent(new CustomEvent('refresh-sprites'));
+          }
+      }
   }
 
   setThought(text: string) {
@@ -53,12 +111,120 @@ export class Customer extends Phaser.GameObjects.Container {
         this.findDoor();
         break;
       case 'EVALUATING':
-        this.findMachine();
+        this.evaluateNeeds();
         break;
       case 'LEAVING':
         this.leave();
         break;
     }
+  }
+
+  evaluateNeeds() {
+    if (this.thirst < 40) {
+      if (this.findObject('vending', "Need a drink!")) return;
+    }
+    if (this.bladder < 40) {
+      if (this.findObject('toilet', "Need bathroom!")) return;
+    }
+
+    // If no urgent needs, find a machine
+    this.findMachine();
+  }
+
+  findObject(type: string, thought: string): boolean {
+    const objects = this.gridManager.getAllObjects().objects;
+    const targets = objects.filter(o => o.type === type);
+
+    if (targets.length === 0) {
+      // If need is critical and object doesn't exist, they might leave
+      if ((type === 'vending' && this.thirst < 10) || (type === 'toilet' && this.bladder < 10)) {
+         this.setThought(`No ${type}! Leaving!`);
+         const store = useGameStore.getState();
+         store.addReputation(-2);
+         this.currentState = 'LEAVING';
+         this.think();
+         return true;
+      }
+      return false;
+    }
+
+    this.setThought(thought);
+    const target = targets[Phaser.Math.Between(0, targets.length - 1)];
+    this.targetNeedObj = { x: target.x, y: target.y, type };
+    this.currentState = 'WALKING_TO_NEED';
+
+    // Find adjacent walkable tile
+    const adjacent = [
+      { x: target.x, y: target.y + TILE_SIZE },
+      { x: target.x, y: target.y - TILE_SIZE },
+      { x: target.x + TILE_SIZE, y: target.y },
+      { x: target.x - TILE_SIZE, y: target.y }
+    ];
+
+    let tX = target.x;
+    let tY = target.y + TILE_SIZE;
+    for (let pos of adjacent) {
+        if (this.gridManager.isWalkable(pos.x, pos.y)) {
+            tX = pos.x;
+            tY = pos.y;
+            break;
+        }
+    }
+
+    this.calculatePath(this.x, this.y, tX, tY, () => {
+      this.currentState = 'FULFILLING_NEED';
+      this.fulfillNeed();
+    });
+
+    return true;
+  }
+
+  fulfillNeed() {
+    if (!this.targetNeedObj) {
+      this.currentState = 'EVALUATING';
+      this.think();
+      return;
+    }
+
+    const needObjReal = this.gridManager.getAllObjects().objects.find(o => o.x === this.targetNeedObj!.x && o.y === this.targetNeedObj!.y);
+    if (needObjReal && needObjReal.condition !== undefined && needObjReal.condition <= 0) {
+       this.setThought("It's broken!");
+       this.currentState = 'EVALUATING';
+       this.think();
+       return;
+    }
+
+    if (this.targetNeedObj.type === 'vending') {
+       const store = useGameStore.getState();
+       if (this.budget >= 2) {
+          store.addMoney(2);
+          this.budget -= 2;
+          this.setThought("Ah, refreshing!");
+          this.thirst = 100;
+
+          if (Math.random() > 0.5) this.dropTrash();
+
+          if (needObjReal) {
+             const cond = this.gridManager.damageObject(needObjReal.id, Phaser.Math.Between(2, 5));
+             if (cond <= 0) window.dispatchEvent(new CustomEvent('refresh-sprites'));
+          }
+       } else {
+          this.setThought("Too broke for drink!");
+       }
+    } else if (this.targetNeedObj.type === 'toilet') {
+       this.setThought("Ahhh...");
+       this.bladder = 100;
+       if (needObjReal) {
+          const cond = this.gridManager.damageObject(needObjReal.id, Phaser.Math.Between(5, 10));
+          if (cond <= 0) window.dispatchEvent(new CustomEvent('refresh-sprites'));
+       }
+    }
+
+    setTimeout(() => {
+      if (!this.scene) return;
+      this.currentState = 'EVALUATING';
+      this.think();
+    }, 2000);
   }
 
   findDoor() {
@@ -151,6 +317,15 @@ export class Customer extends Phaser.GameObjects.Container {
        return;
     }
 
+    // Check if machine is broken
+    const machineObj = this.gridManager.getAllObjects().objects.find(o => o.id === this.targetMachine);
+    if (machineObj && machineObj.condition !== undefined && machineObj.condition <= 0) {
+       this.setThought("It's broken!");
+       this.currentState = 'EVALUATING';
+       this.think();
+       return;
+    }
+
     const store = useGameStore.getState();
     const price = store.getMachinePrice(this.targetMachine);
 
@@ -180,6 +355,12 @@ export class Customer extends Phaser.GameObjects.Container {
       store.addReputation(1);
     }
 
+    // Damage the machine
+    const newCondition = this.gridManager.damageObject(this.targetMachine, Phaser.Math.Between(5, 15));
+    if (newCondition <= 0) {
+        window.dispatchEvent(new CustomEvent('refresh-sprites'));
+    }
+
     // Simulate playing for a bit
     setTimeout(() => {
       if (!this.scene) return;
@@ -196,6 +377,9 @@ export class Customer extends Phaser.GameObjects.Container {
 
   leave() {
     this.setThought("Bye!");
+    if (this.needsTimer) {
+        this.needsTimer.destroy();
+    }
     // Go back to spawn (or offscreen)
     this.calculatePath(this.x, this.y, 0, -200, () => {
       this.destroy();
