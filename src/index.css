@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  overflow: hidden; /* Prevent scrolling when game is active */
+  background-color: #111;
+  color: white;
+}
